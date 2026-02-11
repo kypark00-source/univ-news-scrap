@@ -1,0 +1,165 @@
+import re
+import json
+import time
+import os
+import sys
+import signal
+from pathlib import Path
+from datetime import date, datetime, timedelta
+import xml.etree.ElementTree as ET
+
+import streamlit as st
+import pandas as pd
+import requests
+
+# =========================
+# 1. 경로 및 설정 관리
+# =========================
+# 실행 파일(exe) 환경에서도 설정 파일 위치를 정확히 잡기 위한 로직
+if getattr(sys, 'frozen', False):
+    APP_DIR = Path(os.path.dirname(sys.executable)).resolve()
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
+SETTINGS_PATH = APP_DIR / "news_settings.json"
+
+DEFAULT_SETTINGS = {
+    "schools": ["고려대", "동국대", "연세대", "성균관대", "가천대", "건국대", "경기대"],
+    "keywords": ["장학금", "발전기금", "기부", "후원", "기금", "모금"]
+}
+
+
+def load_settings():
+    if SETTINGS_PATH.exists():
+        try:
+            return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except:
+            pass
+    return DEFAULT_SETTINGS
+
+
+def save_settings(data):
+    SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# 세션 상태에 설정 로드
+if 'config' not in st.session_state:
+    st.session_state.config = load_settings()
+
+
+# =========================
+# 2. 뉴스 검색 엔진
+# =========================
+def fetch_news(keyword, start_date, end_date):
+    encoded_kw = requests.utils.quote(keyword)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+    results = []
+    try:
+        resp = requests.get(rss_url, timeout=10)
+        root = ET.fromstring(resp.text)
+        for item in root.findall('.//item'):
+            title = item.find('title').text
+            link = item.find('link').text
+            pub_date_raw = item.find('pubDate').text[:16]
+            try:
+                pub_date = pd.to_datetime(pub_date_raw).date()
+            except:
+                continue
+
+            if start_date <= pub_date <= end_date:
+                results.append({"date": pub_date, "title": title, "link": link})
+    except:
+        pass
+    return results
+
+
+# =========================
+# 3. UI 구성 (Streamlit)
+# =========================
+st.set_page_config(page_title="대학 뉴스 스크랩 매니저", layout="wide")
+st.title("📰 대학 뉴스 통합 검색 및 관리 시스템")
+
+# --- 사이드바 영역 ---
+with st.sidebar:
+    st.header("⚙️ 검색 및 필터 설정")
+
+    # 키워드 편집
+    kw_input = st.text_area("🔍 검색 키워드 (쉼표 구분)",
+                            value=", ".join(st.session_state.config["keywords"]),
+                            help="구글 뉴스에서 검색할 단어들을 입력하세요.")
+
+    # 학교 편집
+    sch_input = st.text_area("🏫 필터링 학교명 (쉼표 구분)",
+                             value=", ".join(st.session_state.config["schools"]),
+                             help="수집된 기사 중 이 이름이 포함된 것만 골라냅니다.")
+
+    if st.button("✅ 설정 저장하기", use_container_width=True):
+        st.session_state.config["keywords"] = [x.strip() for x in kw_input.split(",") if x.strip()]
+        st.session_state.config["schools"] = [x.strip() for x in sch_input.split(",") if x.strip()]
+        save_settings(st.session_state.config)
+        st.success("설정이 저장되었습니다!")
+
+    st.divider()
+
+    # 기간 설정
+    st.subheader("🗓️ 기간 선택")
+    st_d = st.date_input("시작일", value=date.today() - timedelta(days=14))
+    en_d = st.date_input("종료일", value=date.today())
+
+    # --- 시스템 종료 버튼 (사이드바 최하단) ---
+    st.sidebar.markdown("<br>" * 5, unsafe_allow_html=True)  # 여백 확보
+    st.sidebar.divider()
+    if st.sidebar.button("❌ 프로그램 완전히 종료", help="백그라운드 서버를 끄고 프로그램을 닫습니다.", use_container_width=True):
+        st.warning("프로그램을 종료합니다...")
+        time.sleep(1.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+# =========================
+# 4. 메인 실행 영역
+# =========================
+if st.button("🚀 뉴스 수집 및 필터링 시작", type="primary", use_container_width=True):
+    schools = st.session_state.config["schools"]
+    includes = st.session_state.config["keywords"]
+
+    all_raw = []
+    status = st.empty()
+
+    for kw in includes:
+        status.info(f"현재 '{kw}' 관련 기사들을 수집하고 있습니다...")
+        all_raw.extend(fetch_news(kw, st_d, en_d))
+
+    if all_raw:
+        # 중복 기사 제거
+        df_all = pd.DataFrame(all_raw).drop_duplicates(subset=["link"])
+
+        # 학교명 매칭 필터링
+        final_list = []
+        for _, row in df_all.iterrows():
+            matched_school = next((s for s in schools if s in row['title']), None)
+            if matched_school:
+                row_dict = row.to_dict()
+                row_dict['school'] = matched_school
+                final_list.append(row_dict)
+
+        if final_list:
+            df = pd.DataFrame(final_list).sort_values(by="date", ascending=False)
+            status.success(f"검색 완료! 총 {len(df)}건의 대학 관련 뉴스를 찾았습니다.")
+
+            # 결과 리스트 출력
+            for i, r in df.iterrows():
+                with st.container():
+                    col_info, col_btn = st.columns([8, 2])
+                    with col_info:
+                        st.markdown(f"#### {r['title']}")
+                        st.caption(f"📅 날짜: {r['date']} | 🏫 학교: {r['school']}")
+                    with col_btn:
+                        st.link_button("기사 보기 🔗", r['link'], use_container_width=True)
+                st.divider()
+
+            # CSV 다운로드
+            csv_data = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button("⬇️ 검색 결과 CSV로 저장", csv_data, f"news_report_{date.today()}.csv")
+        else:
+            status.warning("기사는 찾았으나 지정하신 학교명이 포함된 뉴스가 없습니다. 학교명을 확인해 보세요.")
+    else:
+        status.error("해당 기간 내에 검색된 기사가 없습니다. 기간을 늘려보세요.")
