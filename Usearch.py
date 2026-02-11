@@ -3,31 +3,24 @@ import json
 import time
 import os
 import sys
-import signal
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import date, datetime, timedelta
-import xml.etree.ElementTree as ET
 
 import streamlit as st
 import pandas as pd
 import requests
 
 # =========================
-# 1. 경로 및 설정 관리
+# 1. 경로 및 설정 관리 (웹 버전 최적화)
 # =========================
-# 실행 파일(exe) 환경에서도 설정 파일 위치를 정확히 잡기 위한 로직
-if getattr(sys, 'frozen', False):
-    APP_DIR = Path(os.path.dirname(sys.executable)).resolve()
-else:
-    APP_DIR = Path(__file__).resolve().parent
-
-SETTINGS_PATH = APP_DIR / "news_settings.json"
+# 웹 환경에서는 현재 작업 디렉토리를 기준으로 설정 파일을 잡습니다.
+SETTINGS_PATH = Path("news_settings.json")
 
 DEFAULT_SETTINGS = {
     "schools": ["고려대", "동국대", "연세대", "성균관대", "가천대", "건국대", "경기대"],
     "keywords": ["장학금", "발전기금", "기부", "후원", "기금", "모금"]
 }
-
 
 def load_settings():
     if SETTINGS_PATH.exists():
@@ -37,15 +30,16 @@ def load_settings():
             pass
     return DEFAULT_SETTINGS
 
-
 def save_settings(data):
-    SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
+    # 웹 서버 환경에서도 파일 쓰기가 가능하도록 설정
+    try:
+        SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except:
+        st.error("설정 파일 저장 중 오류가 발생했습니다. (권한 문제일 수 있습니다)")
 
 # 세션 상태에 설정 로드
 if 'config' not in st.session_state:
     st.session_state.config = load_settings()
-
 
 # =========================
 # 2. 뉴스 검색 엔진
@@ -71,7 +65,6 @@ def fetch_news(keyword, start_date, end_date):
     except:
         pass
     return results
-
 
 # =========================
 # 3. UI 구성 (Streamlit)
@@ -106,13 +99,13 @@ with st.sidebar:
     st_d = st.date_input("시작일", value=date.today() - timedelta(days=14))
     en_d = st.date_input("종료일", value=date.today())
 
-# --- 시스템 종료 안내 (웹 버전용으로 수정) ---
-st.sidebar.markdown("<br>" * 5, unsafe_allow_html=True)  # 여백 확보
+# --- 시스템 종료 안내 ---
+st.sidebar.markdown("<br>" * 5, unsafe_allow_html=True)
 st.sidebar.divider()
 
 if st.sidebar.button("❌ 프로그램 종료 안내", help="웹 버전은 브라우저 탭을 닫으면 종료됩니다.", use_container_width=True):
-    st.balloons()  # 종료 축하(?) 풍선 효과
-    st.error("웹 버전은 서버를 직접 끌 수 없습니다. 사용을 마치셨다면 브라우저 탭(창)을 직접 닫아주세요!")
+    st.balloons()
+    st.error("웹 버전은 서버를 직접 끌 수 없습니다. 브라우저 탭을 직접 닫아주세요!")
     st.info("이 주소를 즐겨찾기 해두시면 언제든 다시 접속하실 수 있습니다.")
 
 # =========================
@@ -130,10 +123,8 @@ if st.button("🚀 뉴스 수집 및 필터링 시작", type="primary", use_cont
         all_raw.extend(fetch_news(kw, st_d, en_d))
 
     if all_raw:
-        # 중복 기사 제거
         df_all = pd.DataFrame(all_raw).drop_duplicates(subset=["link"])
 
-        # 학교명 매칭 필터링
         final_list = []
         for _, row in df_all.iterrows():
             matched_school = next((s for s in schools if s in row['title']), None)
@@ -146,7 +137,6 @@ if st.button("🚀 뉴스 수집 및 필터링 시작", type="primary", use_cont
             df = pd.DataFrame(final_list).sort_values(by="date", ascending=False)
             status.success(f"검색 완료! 총 {len(df)}건의 대학 관련 뉴스를 찾았습니다.")
 
-            # 결과 리스트 출력
             for i, r in df.iterrows():
                 with st.container():
                     col_info, col_btn = st.columns([8, 2])
@@ -157,11 +147,9 @@ if st.button("🚀 뉴스 수집 및 필터링 시작", type="primary", use_cont
                         st.link_button("기사 보기 🔗", r['link'], use_container_width=True)
                 st.divider()
 
-            # CSV 다운로드
             csv_data = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
             st.download_button("⬇️ 검색 결과 CSV로 저장", csv_data, f"news_report_{date.today()}.csv")
         else:
-            status.warning("기사는 찾았으나 지정하신 학교명이 포함된 뉴스가 없습니다. 학교명을 확인해 보세요.")
+            status.warning("기사는 찾았으나 지정하신 학교명이 포함된 뉴스가 없습니다.")
     else:
-
-        status.error("해당 기간 내에 검색된 기사가 없습니다. 기간을 늘려보세요.")
+        status.error("해당 기간 내에 검색된 기사가 없습니다.")
